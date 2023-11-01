@@ -7,5 +7,7 @@ I dati sono stati ottenuti a [questo link](https://www.openml.org/search?type=da
 - Le signole osservazioni rappresentano chiamate ai clienti. La variabile di interesse è binaria, l'accettazione o meno dell'offerta proposta.  
 - L'insieme di feature a disposizione per effettuare la classificazione è disponibile al link.
 
+I dati sono composti da due dataset, bank_full.csv e bank_additional_full.csv, il primo utilizzato per l'analisi dell'interesse e il clustering, i secondo utilizzato per l'analisi dei clienti in default.
+
 ## Codice
 Il codice relativo al file "Previsione dell'interesse" fa riferimento all'analisi svolta al fine del primo obiettivo: cercare un modello che preveda l'interesse del cliente per il prodotto offerto. La metrica utilizzata per il confronto tra i modelli è il punteggio F1. Il codice è scritto in markdown, ma solo per poterlo organizzare i segmenti. Non è pensato per essere knittato in un pdf.
