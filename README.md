@@ -8,4 +8,4 @@ I dati sono stati ottenuti a [questo link](https://www.openml.org/search?type=da
 - L'insieme di feature a disposizione per effettuare la classificazione è disponibile al link.
 
 ## Codice
-Il codice non è stato riorganizzato prima di essere caricato, potrebbe essere un po' confuso.
+Il codice relativo al file "Previsione dell'interesse" fa riferimento all'analisi svolta al fine del primo obiettivo: cercare un modello che preveda l'interesse del cliente per il prodotto offerto. La metrica utilizzata per il confronto tra i modelli è il punteggio F1. Il codice è scritto in markdown, ma solo per poterlo organizzare i segmenti. Non è pensato per essere knittato in un pdf.
