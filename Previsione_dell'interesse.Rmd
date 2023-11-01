@@ -1,0 +1,916 @@
+---
+title: "Marketing_Analysis"
+author: "Marco"
+date: "2023-06-04"
+output: html_document
+---
+
+```{r}
+rm(list=ls())
+```
+
+```{r Librerie}
+library(randomForest)
+library(ModelMetrics)
+library(bestglm)
+library(gam)
+library(tree)
+library(gbm)
+library(ipred)
+library(gridExtra)
+library(MASS)
+library(ipred)
+library(dplyr)
+library(caret)
+library(tidyverse)
+library(viridis)
+## Caricare il file lift-roc
+setwd("C:/Users/User/Documents/DATI AZIENDALI/LAVORO DI GRUPPO")
+source("lift-roc-tab.r")
+
+```
+
+```{r Dati}
+setwd("C:/Users/User/Documents/DATI AZIENDALI/LAVORO DI GRUPPO/DATI/bank-additional")
+bank <- read.csv("bank-additional-full.csv", sep =";")
+str(bank)
+
+```
+
+```{r Funzioni necessarie, include=FALSE}
+
+## Distanza dall'angolo top-left
+cz = function(modello, soglia, y) {
+  x = 1 - specificity(y,modello,cutoff = soglia)
+  y = sensitivity(y,modello,cutoff = soglia)
+  # distanza da (0,1)
+  sqrt(((0-x)^2 + (1-y)^2))
+}
+
+## F1
+cz_f1 = function(modello, soglia, y) {
+  class <- ifelse(modello > soglia, 1,0)
+  
+  #Metriche necessarie
+  falsi_pos <- sum(class == 1 & y == 0)
+  falsi_neg <- sum(class == 0 & y == 1)
+  true_pos <- sum(class == 1 & y == 1)
+  
+  #Recall e precision
+  recall <- true_pos / (true_pos + falsi_neg)
+  precision <- true_pos / (true_pos + falsi_pos)
+  
+  ##F1
+  f1 <- 2/(1/precision + 1/recall)
+  return(f1)
+}
+
+## Metriche
+model_metrics <- function(class, real.class){
+  accuracy <- sum(class == real.class)/length(real.class)     ## Accuracy
+ 
+  ## Elementi della tabella
+  falsi_pos <- sum(class == "yes" & real.class == "no")
+  falsi_neg <- sum(class == "no" & real.class == "yes")
+  true_pos <- sum(class == "yes" & real.class == "yes")
+  
+  ## Recall e precision
+  recall <- true_pos / (true_pos + falsi_neg)
+  precision <- true_pos / (true_pos + falsi_pos)
+  
+  #f1
+  f1 <- 2/(1/precision + 1/recall)
+  
+  ##return
+  r <- c(falsi_pos, falsi_neg, round(accuracy,3), round(recall,3), round(precision,3), round(f1,3))
+  return(r)
+}
+```
+
+```{r Pulizia - Togliere gli unknown}
+
+unknowns <- rep(NA,length(colnames(bank)))
+for (i in colnames(bank)){
+  unknowns[colnames(bank) == i] <- sum(bank[,i] == "unknown")
+}
+names(unknowns) <- colnames(bank)
+unknowns
+
+## Togliamo tutti gli unknown per fare una prova.
+bank.clean <- bank[bank$job != "unknown" & bank$marital != "unknown" & bank$education != "unknown" & bank$housing != "unknown",]
+
+## Tolte circa 3000 osservazioni.
+
+##Facciamo il grafico dei dati mancanti
+NAs <- unknowns[unknowns!=0]
+NAs <- round(NAs/nrow(bank),3) *100    ## Dati mancanti in percentuale
+NAs.df <-data.frame(var = names(NAs), missing = NAs) 
+NAs.df <- NAs.df[order(NAs.df$missing, decreasing =FALSE),]
+rownames(NAs.df) <- NULL
+NAs.df$var <- factor(NAs.df$var, levels = NAs.df$var)
+
+
+## Grafico dei dati mancanti
+col <- rev(inferno(7))[-7]
+col = c("#FCFFA4FF","#FCB519FF","#ED6925FF","#ED6925FF","#BB3754FF","#781C6DFF")
+
+NAs.plot <- ggplot(NAs.df,aes(x = var, y = missing)) + geom_bar(stat = "identity", fill = col) + coord_flip() + ggtitle("Dati mancanti") + 
+  xlab("") + ylab("% di osservazioni mancanti") + 
+  theme(plot.title = element_text(hjust = 0.5))
+NAs.plot
+##Ecco il plot dei nostri dati mancanti
+
+## Primo grafico fatto.
+```
+
+```{r Distribuzione marginale versus condizionata}
+dist <- data.frame()
+d.marg <- round(prop.table(table(bank$y)),2)
+dist <- rbind(dist,c("marginale",d.marg[1],"no"))
+dist <- rbind(dist,c("marginale",d.marg[2],"si"))
+d.cond <- round(prop.table(table(bank$default, bank$y),1),2)  ## Condizionata predittiva.
+dist <-  rbind(dist,c("default = no",d.cond[1,1],"no"))
+dist <-  rbind(dist,c("default = no",d.cond[1,2],"si"))
+dist <-  rbind(dist,c("default = NA",d.cond[2,1],"no"))
+dist <- rbind(dist, c("default = NA",d.cond[2,2],"si"))
+colnames(dist) <- c("distribuzione","prob","level")
+dist$prob <- as.numeric(dist$prob)
+str(dist)
+
+## Facciamo i grafici
+dist.plot <- ggplot(data = dist, aes(x = distribuzione,y=prob,fill=level)) + geom_bar(stat="identity", position = position_dodge()) + scale_x_discrete(limits = c("marginale","default = no","default = NA")) + 
+  ggtitle("Distr. marginale vs condizionate (default)") + 
+  guides(fill=guide_legend(title="Outcome della chiamata")) +
+  theme(plot.title = element_text(hjust=0.5),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size=9)) + 
+  ylab("densità") + xlab("")
+  
+dist.plot
+```
+
+```{r Pulizia - Variabili}
+
+## PDAYS E PREVIOUS
+# divisione di pdays in classi (la rende più utilizzabile nei modelli)
+bank.clean$pdays_class = "mai contattato"
+bank.clean$pdays_class [bank.clean$pdays < 8] = "entro 1 settimana"
+bank.clean$pdays_class [bank.clean$pdays < 15 & bank.clean$pdays>7] = "tra 1 e 2 settimane"
+bank.clean$pdays_class [bank.clean$pdays >14 & bank.clean$pdays<999] = "più di 2 settimane"
+table(bank.clean$pdays_class)
+bank.clean$pdays_class  = factor (bank.clean$pdays_class)
+bank.clean$pdays_class  = relevel (bank.clean$pdays_class, ref = 2)
+
+table(bank.clean$previous)
+
+# previous
+table(bank.clean$previous)
+prova = bank.clean$previous
+prova[bank.clean$previous > 3] <- "4+"
+prova [bank.clean$previous == 0] = 'mai'
+prova [bank.clean$previous == 1] = '1'
+prova [bank.clean$previous == 2] = '2'
+prova [bank.clean$previous == 3] = '3'
+table(prova)
+bank.clean$prev.class = relevel(factor(prova), ref = 5 )
+table(bank.clean$prev.class)
+
+
+
+quant = c()
+qual = c()
+for (nome in colnames(bank.clean)){
+  if (is.numeric(bank.clean[,nome])){ quant = c(quant, nome)}
+  else{qual = c(qual, nome)}
+}
+
+## Character a fattori
+for (i in qual) {
+  bank.clean[,i] <- as.factor(bank.clean [,i])
+}
+
+str(bank.clean)
+
+```
+
+```{r Train set, test set e validation set}
+## Facciamo lo split.
+dim(bank.clean)
+head(bank.clean)
+
+## Vogliamo le osservazioni fino ad aprile dell'anno successivo.
+seq <- which(bank.clean$month == "may") - c(0,which(bank.clean$month == "may")[-length(which(bank.clean$month == "may"))])
+which(bank.clean$month == "may")[which(seq != 1)]
+
+## I primi due anni
+train_e_test <- bank.clean[1:36412,]
+bank.clean[c(36411,36412,36413),]
+
+## E poi il validation set
+val <- bank.clean[36413:nrow(bank.clean),]
+
+## Costruiamo il training e il test set.
+set.seed(1234)
+train1 <- sample(1:nrow(train_e_test), 0.7*nrow(train_e_test))
+test1 <- setdiff(1:nrow(train_e_test), train1)
+train <- train_e_test[train1,]
+test <- train_e_test[test1,]
+
+## Verifichiamo le dimensioni
+Datasets <- data.frame(Nome = c("train","test","val"),
+                       Dimensione = c(nrow(train), nrow(test), nrow(val)),
+                       Dim.relativa = round(c(nrow(train)/nrow(bank.clean),nrow(test)/nrow(bank.clean), nrow(val)/nrow(bank.clean)),3)
+                       )
+Datasets
+
+
+
+## Centratura
+par.centr <- bank.clean %>% preProcess(method = c("center","scale"))
+train <- par.centr %>% predict(train)
+test <- par.centr %>% predict(test)
+val <- par.centr %>% predict(val)
+
+train$ynum <- as.numeric(train$y == "yes")
+test$ynum <- as.numeric(test$y == "yes")
+val$ynum <- as.numeric(val$y == "yes")
+
+```
+
+```{r Grafico divisione}
+bank.clean$year <- 2008
+which(bank.clean$month=="dec")
+
+bank.clean$year[25733:36412] <- 2009
+bank.clean$year[36413:38245] <- 2010
+
+##Creo il set di appartenenza delle osservazioni.
+bank.clean$set <- "train set"
+bank.clean$set[test1] <- "test set"
+bank.clean$set[36413:nrow(bank.clean)] <- "val set"
+
+##Quindi, nuovo dataset per fare le cose
+bank.for.plot <- bank.clean[,c("month","year","set")]
+
+bank.for.plot$month <- factor(bank.for.plot$month, levels = c("jan","feb","mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))
+sum(table(bank.for.plot$month))
+
+tab3m <- table(factor(bank.for.plot$set), bank.for.plot$month, factor(bank.for.plot$year))
+monthlytab08 <- tab3m[,,1]
+monthlytab09 <- tab3m[,,2]
+monthlytab10 <- tab3m[,,3]
+
+all.months <- bank.for.plot$month
+
+tab3m.all.months <- table(factor(bank.for.plot$set), all.months, factor(bank.for.plot$year))
+prop.acc.mens <- cbind(rep(0, 36),rep(0, 36),rep(0, 36))
+
+prop.acc.mens[1:12,] <- t(tab3m.all.months[,,1])
+prop.acc.mens[13:24,] <- t(tab3m.all.months[,,2])
+prop.acc.mens[25:36,] <- t(tab3m.all.months[,,3])
+prop.acc.mens[is.na(prop.acc.mens)] <- 0
+prop.acc.mens
+prop.acc.mens <- as.data.frame(prop.acc.mens)
+prop.acc.mens$Mese <- rep(levels(all.months), 3)
+colnames(prop.acc.mens)[1:3] <- c("test"," train","val")
+prop.acc.mens$anno <- c(rep("2008",12),rep("2009",12), rep("2010",12))
+prop.acc.mens$mese_anno <- paste(prop.acc.mens$anno,prop.acc.mens$Mese)
+
+
+dati.mensili.df <- prop.acc.mens
+dati.mensili.df$mese_anno <- factor(dati.mensili.df$mese_anno, levels = dati.mensili.df$mese_anno)
+
+
+
+## Abbiamo il dataset modificato.
+
+## Plot con la divisione per train, test e val set.
+## Ho bisogno di un nuovo dataset.
+df1 <- dati.mensili.df[,c(6,2)]
+df1$set <- "train"
+colnames(df1)[2] <- "osservazioni"
+
+df2<- dati.mensili.df[,c(6,1)]
+df2$set <- "test"
+colnames(df2)[2] <- "osservazioni"
+
+df3<- dati.mensili.df[,c(6,3)]
+df3$set <- "val"
+colnames(df3)[2] <- "osservazioni"
+
+dati.mensili.for.plot <- rbind(df1,df2,df3)
+scale_x_discrete(labels = dati.mensili.df$Mese)
+m <- c("jan","feb","mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+division.plot <- ggplot(data = dati.mensili.for.plot, aes(x = mese_anno, y = osservazioni, fill = set)) + 
+  geom_bar(stat = "identity") + scale_x_discrete(labels = rep(m,3)) +
+  xlab("Tempo") + ylab("Frequenze") + ggtitle("Chiamate effettuate") +
+  annotate("text", x = c(6.5,18.5,30.5), y = 7900, label =c("2008","2009","2010")) +
+  theme(plot.title = element_text(hjust=0.5)) + ggtitle("Divisione del dataset")
+  
+division.plot
+```
+
+
+
+
+```{r Oversampling e Undersampling}
+
+## Per il momento non tocchiamoli
+
+##Sovracampioniamo nel training set.
+
+train$id <- 1:nrow(train)
+table(train$y) ## Sbilanciamento da risolvere.
+
+set.seed(1234)
+overSample <- sample(train$id[train$y == "yes"], 3500, replace = TRUE)
+underSample <- sample(train$id[train$y == "no"], table(train$y)[1], replace = FALSE)
+
+## Train set bilanciato
+train.bal <- as.data.frame(train[train$id == overSample[1],])
+
+for (i in 2:length(overSample)) {
+  train.bal[i,] <- train[train$id == overSample[i],]
+}
+
+## Aggiungiamo i default no.
+train.bal <- rbind(train.bal, train[train$id %in% underSample,])
+
+train <- train.bal
+
+```
+
+```{r Preparazione ai modelli}
+
+##Formule
+colnames(train)
+
+## Escludendo pdays per il momento.
+X <- c("age","job","marital","education","default","housing","loan","contact","month","day_of_week","campaign","poutcome", "emp.var.rate","cons.price.idx","cons.conf.idx","euribor3m","nr.employed", "prev.class", "pdays_class")
+
+##Formule
+f.lin <- formula(paste("ynum ~ ",paste(X,collapse = " + ")))
+f.bin <- formula(paste("y ~ ",paste(X,collapse = " + ")))
+
+## Elenco delle soglie
+tr <- table(train$y)[2]/table(train$y)[1]
+ss <- seq(from = 0.001, to = 0.4, length.out = 300)
+
+```
+
+
+```{r Modello logistico}
+## PRIMO DATASET
+
+m.log.completo <- glm(f.bin, family = binomial, data = train)
+summary(m.log.completo)
+
+## Procedura stepwise in entrambe le direzioni.
+m.log.step <- step(m.log.completo, direction="both")
+summary(m.log.step)  ## Ci mette un po' troppo
+
+## Valutiamo le previsioni di questi due modelli.
+
+fits.loc.comp <- predict(m.log.completo, newdata = test, type ="response")  # qua c'era test.nosep
+fits.loc.step <- predict(m.log.step, newdata = test, type ="response")  # qua c'era test.nosep
+
+
+## Valutiamo le previsioni contro le diverse soglie, usando quelle ottimali per entrambi.
+
+s_ott_comp <- ss[which.max(sapply(ss, function(l) cz_f1(fits.loc.comp,l, test$ynum)))] # qua c'era test.nosep
+
+s_ott_step <- ss[which.max(sapply(ss, function(l) cz_f1(fits.loc.step,l, test$ynum)))] # qua c'era test.nosep
+
+## Non otteniamo great previsioni.
+
+
+## Metriche
+class.loc.step <- ifelse(fits.loc.step > s_ott_step, "yes","no")
+class.loc.comp <- ifelse(fits.loc.comp > s_ott_comp, "yes","no")
+
+## ROC-LIFT
+#lift.roc(fits.loc.step,test$ynum,type = "crude")
+#lift.roc(fits.loc.comp,test$ynum,type = "crude")
+
+
+## Risultati
+log.step <- model_metrics(class.loc.step, test$y)
+log.step.c <- model_metrics(class.loc.comp, test$y)
+
+log.step
+log.step.c
+
+RISULTATI <- data.frame(Modello = "GLM stepwise",FP = log.step[1], FN = log.step[2], Accuracy = log.step[3], Recall = log.step[4], Precision = log.step[5], F1_Score = log.step[6])
+RISULTATI[2,] <- c("GLM completo", log.step.c)
+
+tab_f1
+tab_cz      ## Recall molto più alto, ma precisione molto più bassa.
+            ## Il modello migliore? Non è chiaro. Basarsi sulla curva roc è meglio.
+
+
+## Nel validation set come si comporta?
+
+fits.val <- predict(m.log.step, newdata = val[,X], type ="response")
+length(fits.val)
+class.val <- ifelse(fits.val > s_ott_step, "yes","no")
+table(val$y)
+table(class.val)
+table(class.val, val$y)
+ynum <- as.numeric(val$y == "yes")
+
+## Hanno probabilmente utilizzato un modello predittivo sul terzo anno.
+lift.roc(fits.val,ynum,type = "crude")
+
+## Ok, un pochino fastidioso onestamente.
+
+
+
+## F1 un po' basso onestamente.
+## Molto più alto adesso, visto che la selezione della soglia ottimale massimizza l'F1 score.
+```
+
+```{r Albero di classificazione}
+
+## Facciamo uno split in training set e test set.
+set.seed(4321)
+cb1 <- sample(1:nrow(train), 0.5*nrow(train))
+cb2 <- setdiff(1:nrow(train),cb1)
+
+## Stimare l'albero
+m.tree1 <- tree(f.bin, data=train[cb1,],
+               split = "deviance",
+               control=tree.control(nobs=nrow(train[cb1,]),
+                                    mincut = 20,
+                                    mindev=0.0001))
+
+prune.tree.1= prune.tree(m.tree1, newdata=train[cb2,])
+plot(prune.tree.1)
+abline(v=prune.tree.1$size[which.min(prune.tree.1$dev)], col="red")
+
+## Bell'aspetto quest'albero.
+opt_size <- prune.tree.1$size[which.min(prune.tree.1$dev)]
+m.tree.1 <- prune.tree(m.tree1, best = opt_size)
+
+## Soglia ottimale
+fits.tree1 <- predict(m.tree.1, test[,X])[,2]
+head(fits.tree1)
+s_ott <- ss[which.max(sapply(ss, function(l) cz_f1(fits.tree1,l, test$ynum)))]
+class.tree1 <- fits.tree1>s_ott
+class.tree1 <- ifelse(class.tree1 == TRUE, "yes","no")
+
+## Previsioni sul test set?
+tree1 <- model_metrics(class.tree1, test$y)
+
+## QUI CI SONO I RISULTATI
+RISULTATI[3,] <- c("Albero", tree1)
+
+## NEL VALIDATION SET
+fits.tree.v <- predict(m.tree.1, val[,X])[,2]
+s_ott_v <- ss[which.max(sapply(ss, function(l) cz_f1(fits.tree.v,l, val$ynum)))]
+
+class.gam.v <- ifelse(fits.gam.v > s_ott, "yes","no")
+table(class.gam.v, val$y)
+
+
+```
+
+```{r Modello lineare}
+
+m.lin.comp <- lm(f.lin, data=train)
+m.lin.step <- step(m.lin.comp, direction ="both")
+
+## Previsioni nel test set
+fits.lin.comp <- predict(m.lin.comp, newdata = test)
+fits.lin.step <- predict(m.lin.step, newdata = test)
+summary(fits.lin.step)
+
+
+## Soglie
+s_ott_comp <- ss[which.max(sapply(ss, function(l) cz_f1(fits.lin.comp,l, test$ynum)))]
+s_ott_step <- ss[which.max(sapply(ss, function(l) cz_f1(fits.lin.step,l, test$ynum)))]
+
+## Classi
+class.lin.comp <- ifelse(fits.lin.comp> s_ott_comp, "yes","no")
+class.lin.step <- ifelse(fits.lin.step > s_ott_step, "yes","no")
+
+## Metriche
+lin.comp.metrics <- model_metrics(class.lin.comp, test$y)
+lin.step.metrics <- model_metrics(class.lin.step, test$y)
+
+## Nel data frame
+RISULTATI[4,] <- c("LM completo", lin.comp.metrics)
+RISULTATI[5,] <- c("LM stepwise", lin.step.metrics)
+
+```
+
+```{r Modello GAM}
+
+## Costruzione della formula
+X.qual <- X[X %in% qual]
+X.quant <- X[!X %in% qual]
+
+#Formula
+f.gam <- formula(paste("y ~",paste(c(X.qual,paste(paste0("s(",X.quant,")"), collapse = " + ")),collapse=" + ")))
+m.gam <- gam(f.gam, data=train, family = binomial)
+summary(m.gam)
+plot(m.gam)
+
+## Cerco la soglia ottimale
+fits.gam <- predict(m.gam, test[,X], type="response")
+s_ott <- ss[which.max(sapply(ss, function(l) cz_f1(fits.gam,l, test$ynum)))]
+
+## Previsioni
+class.gam <- ifelse(fits.gam > s_ott, "yes","no")
+
+#Metriche
+gam.metrics <- model_metrics(class.gam, test$y)
+
+RISULTATI[6,] <- c("Modello GAM", gam.metrics)
+
+
+
+## Proviamo a ridurre le variabili considerate.
+formula(m.log.step)
+vars.selected <- as.character(formula(m.log.step))[3]
+var.sel.vec <- strsplit(vars.selected," ")[[1]]
+X.selected <- X[X %in% var.sel.vec]
+
+
+## Ottimo, adesso costruiamo la formula semplificata
+X.qual <- X.selected[X.selected %in% qual]
+X.quant <- X.selected[!X.selected %in% qual]
+
+#Formula ridotta
+f.gam.ridotta <- formula(paste("y ~",paste(c(X.qual,paste(paste0("s(",X.quant,")"), collapse = " + ")),collapse=" + ")))
+
+m.gam2 <- gam(f.gam.ridotta, data=train, family = binomial)
+
+## E le previsioni quindi
+fits.gam2 <- predict(m.gam2, test[,X.selected], type="response")
+s_ott_gam2 <- ss[which.max(sapply(ss, function(l) cz_f1(fits.gam2,l, test$ynum)))]
+
+## Previsioni
+class.gam2 <- ifelse(fits.gam2 > s_ott_gam2, "yes","no")
+table(class.gam2, test$y)
+#Metriche
+gam.metrics2 <- model_metrics(class.gam2, test$y)
+
+RISULTATI[7,] <- c("Modello GAM Ridotto ", gam.metrics)
+
+
+
+## NEL VALIDATION SET
+fits.gam.v <- predict(m.gam, val[,X], type="response")
+s_ott_v <- ss[which.max(sapply(ss, function(l) cz_f1(fits.gam.v,l, val$ynum)))]
+
+class.gam.v <- ifelse(fits.gam.v > s_ott_v, "yes","no")
+table(class.gam.v, val$y)
+#Metriche
+gam.metrics2 <- model_metrics(class.gam2, test$y)
+```
+
+```{r lda}
+
+#Il modello iniziale
+m.lda <- lda(f.bin, data=train) 
+f.step = formula(m.log.step)
+
+#Il modello ridotto
+m.lda1 <- lda(f.step, data=train)
+
+fits.lda <- predict(m.lda,test[,X])$posterior[,2]
+s_ott_lda <- ss[which.max(sapply(ss, function(l) cz_f1(fits.lda,l, test$ynum)))]
+
+## Previsioni
+class.lda <- ifelse(fits.lda > s_ott_lda, "yes","no")
+table(class.lda, test$y)
+#Metriche
+lda.metrics <- model_metrics(class.lda, test$y)
+
+
+RISULTATI[8,] <- c("LDA", lda.metrics)
+
+fits.lda1 <- predict(m.lda1,test[,X])$posterior[,2]
+s_ott_lda1 <- ss[which.max(sapply(ss, function(l) cz_f1(fits.lda1,l, test$ynum)))]
+
+## Previsioni
+class.lda1 <- ifelse(fits.lda1 > s_ott_lda1, "yes","no")
+table(class.lda1, test$y)
+#Metriche
+lda.metrics1 <- model_metrics(class.lda1, test$y)
+
+
+RISULTATI[9,] <- c("LDA- Ridotto", lda.metrics1)
+
+```
+
+```{r MARS}
+
+## Utilizziamo lo stesso cb1 e cb2 dell'albero.
+
+library(polspline)
+#Con specifica dei test set e validation set. Non usa la gcv in questo caso.
+m.mars <- polymars(responses = train$y[cb1],
+                   predictors = train[cb1,X],
+                   ts.resp = train$y[cb2],
+                   ts.pred = train[cb2,X],
+                   factors = which(X %in% qual),
+                   maxsize = 100)
+?polymars
+summary(m.mars)
+
+
+#Come nel modello lineare.
+fits.mars <- predict(m.mars,test[,X])[,2]
+summary(fits.mars)
+s_ott_mars <- ss[which.max(sapply(ss, function(l) cz_f1(fits.mars,l, test$ynum)))]
+
+## Previsioni
+class.mars <- ifelse(fits.mars > s_ott_mars, "yes","no")
+table(class.mars, test$y)
+#Metriche
+mars.metrics <- model_metrics(class.mars, test$y)
+
+RISULTATI[10,] <- c("Modello MARS", mars.metrics)
+
+```
+
+```{r foresta casuale}
+
+library(randomForest)
+
+## TROVARE IL NUMERO DI VARIABILI OTTIMALI
+
+# cb1 e cb2 già creati per alberi
+
+performance = NULL
+F = c(1,2,3,4,5,6,7,8,9, 10, 11,12)
+for(f in F){
+  print(f)
+  m.rf <- randomForest(f.bin, data = train[cb1, ], mtry = f, num.tree = 300, trace = 50)
+  fits <- predict(m.rf,train[cb2,X], type="prob")[,2]
+  s_ott <- ss[which.max(sapply(ss, function(l) cz_f1(fits,l, train$ynum[cb2])))]
+  class <- ifelse(fits > s_ott, "yes","no")
+  metrics <- model_metrics(class, train$y[cb2])
+  results <- c(f, metrics)
+  performance <- rbind(performance,results)
+}
+
+## Il migliore? Quello con F1 maggiore
+f.ott <- F[which.max(performance[,7])]
+?randomForest
+m.rf <- randomForest(f.bin, data = train, mtry = f.ott, ntree = 500, do.trace = 50)
+fits.rf <- predict(m.rf,test[,X], type="prob")[,2]
+
+## Proviamo altre soglie per la random forest, solo in questo caso
+s_ott_rf <- ss_rf[which.max(sapply(ss, function(l) cz_f1(fits.rf,l, test$ynum)))]
+
+## Previsioni
+class.rf <- ifelse(fits.rf > s_ott_rf, "yes","no")
+table(class.rf, test$y)
+#Metriche
+rf.metrics <- model_metrics(class.rf, test$y)
+
+RISULTATI[11,] <- c("Random Forest", rf.metrics)
+
+## Salviamo i risultati del campione sbilanciato da qualche parte.
+#write.table(RISULTATI, file="C:/Users/User/Documents/DATI AZIENDALI/LAVORO DI GRUPPO/RISULTATI",sep = ";", quote = FALSE)
+
+
+```
+
+```{r Bagging}
+
+## Recicliamo sempre cb1 e cb2.
+
+performance = NULL
+n = seq(1,40, by = 1)
+for(i in n){
+  print(i)
+  m.bag <- bagging(f.bin, data = train[cb1,], nbagg = i*10)
+  fits <- predict(m.bag,train[cb2,X], type="prob")[,2]
+  s_ott <- ss[which.max(sapply(ss, function(l) cz_f1(fits,l, train$ynum[cb2])))]
+  class <- ifelse(fits > s_ott, "yes","no")
+  metrics <- model_metrics(class, train$y[cb2])
+  results <- c(i, metrics)
+  performance <- rbind(performance,results)
+}
+
+## Buono
+```
+
+```{r Differenze tra primo, secondo e terzo anno}
+## Vediamo di inserire l'anno in bank.clean
+seq <- which(bank.clean$month == "dec") - c(25722,which(bank.clean$month == "dec")[-length(which(bank.clean$month == "dec"))])
+which(bank.clean$month == "dec")[which(seq != 1)]
+## Ok, vediamo quindi di inserire gli anni nel dataset.
+bank.clean$year <- "2008"
+bank.clean[25733:36412,]$year <- "2009"
+bank.clean[36413:nrow(bank.clean),]$year <- "2010"
+
+bank.clean$year <- factor(bank.clean$year, ordered = TRUE, levels = c("2008","2009","2010"))
+table(bank.clean$year)                    ## Il ref level è già 2008
+
+## Adesso abbiamo gli anni.
+## Modelliamo per cercare di capire se ci sono delle differenze in termini di selezione negli anni.
+X.set <- setdiff(X,c("emp.var.rate","cons.price.idx","cons.conf.idx","euribor3m","nr.employed"))
+X.set <- X.set[X.set!="month" & X.set!="day_of_week"]
+
+## Modellino semplice
+## Modello multilogit
+
+library(nnet)
+#I coefficienti per la prima classe sono pari a zero. Quindi quella ? una "categoria di riferimento".
+m.ml <- multinom(year~., data=bank.clean[c("year",X.set)], maxit = 200)
+
+## Facciamo una selezione stepwise.
+
+m.ml2 <- stepAIC(m.ml)
+coefficients(m.ml2)
+
+fits.ml <- predict(m.ml2, newdata = bank.clean)
+tab <- table(fits.ml, bank.clean$year)
+## Ok, le persone che vengono chiamate sono diverse in effetti. O meglio, quelle del 2010 non vengono identificate molto bene. QUesto è molto positivo.
+## Le persone del 2008 e del 2009 vengono facilmente identificate, quelle del 2010 un po' meno bene.
+## Statistiche?
+recall2008 <- tab[1,1] / sum(tab[,1])
+recall2009 <- tab[2,2] / sum(tab[,2])
+recall2010 <- tab[3,3] / sum(tab[,3])
+
+## La selezione non è così buona ora. Potrebbe però essere dovuto allo sbilanciamento delle osservazioni.
+## C'è qualcosa che 
+
+## Osservazioni sono diverse.
+
+## Dal 2008 al 2010:
+## - L'età aumenta
+## - Meno blue collar, imprenditori, manager, self-employed, services, tecnicians. aumentano le casalinghe, i pensionati, i servizi, gli studenti, i disoccupati.
+## - Soprattutto, si riducono gli individui con status di default sconosciuto e default positivo.
+## Selezione inoltre sulla base dei contatti precedenti. AUmentano le persone con previous alto.
+
+## Chi sono i tizi chiamati nel 2010? Non è chiaro.
+bank.clean[fits.ml == "2010" & bank.clean$year == "2010",]
+
+X.set
+
+## Dovremmo confrontare con le distribuzioni marginali della variabile.
+true_2010 <- bank.clean[bank.clean$year == "2010",]
+
+## Vengono chiamati più anziani.
+hist(true_2010$age)
+hist(bank.clean$age)
+
+## Meno differenze in termini di lavoro
+barplot(table(true_2010$job))
+barplot(table(bank.clean$job))
+
+##
+barplot(table(true_2010$education))
+barplot(table(bank.clean$education))
+
+##Default
+barplot(table(true_2010$default))
+barplot(table(bank.clean$default))        ## Vengono chiamati meno individui con status unknown.
+
+##Housing e Loan
+barplot(table(true_2010$housing))
+barplot(table(bank.clean$housing))
+barplot(table(true_2010$loan))
+barplot(table(bank.clean$loan))
+
+##Contact
+barplot(table(true_2010$contact))
+barplot(table(bank.clean$contact))          ## Vengono più spesso contattati con telefono cellulare.
+
+##Campaign
+barplot(table(true_2010$campaign))
+barplot(table(bank.clean$campaign))      ## Coda più lunga per quasta variabile, ma otherwise apposto.
+
+##Poutcome
+barplot(table(true_2010$poutcome))
+barplot(table(bank.clean$poutcome))      ##Poutcome non esxistent scompare.
+
+##
+barplot(table(true_2010$prev.class))
+barplot(table(bank.clean$prev.class))             ##Stesso discorso per previous.
+barplot(table(true_2010$pdays_class))
+barplot(table(bank.clean$pdays_class))            ## Più persone che sono già state contattate.
+
+```
+
+```{r F1 Score in caso di classificazione casuale}
+## 0.5911 Precision
+## 0.81 Recall.
+
+## Che precisione ha invece il validation set.
+table(val$y)[2]/sum(table(val$y)[1:2])
+
+val.res <- matrix(c(185,76,698,874), ncol=2, byrow = TRUE)
+val.res[2]/sum(val.res[1:2,2])    ## Recall, 0.73     ## Avremmo buttato via il 27% delle osservazioni.
+# Buttiamo via 76 clienti.
+sum(val.res[1,1:2])/sum(val.res)  ## Risparmiando però il 14% circa delle chiamate fatte.
+# Risparmiamo 261 chiamate.
+
+## Dipende dai costi - benefici.
+
+```
+
+```{r Gradient Boosting}
+library(gbm)
+m.gbm <- gbm(f.lin, data = train, distribution = "gaussian", n.trees = 5000, interaction.depth = 1)
+## Plot degli errori nel training set.
+plot(m.gbm$train.error, type="l", ylab="training error")     ## Sempre decrescente.
+
+## Vediamo nel test set come si comporta
+fits.gbm.boost <- predict(m.gbm, newdata = test[,X], n.tree = 1:5000)
+
+## Errore di previsione ul test set
+err = apply(fits.gbm.boost, 2, function(pred) mean((test$ynum - pred)^2))
+plot(err, type ="l")     ## L'errore si stabilizza. Qual'è il minimo?
+
+## Intorno a tremila alberi
+## Come si comporta nel test set?
+fits.gbm <- predict(m.gbm, newdata = test[,X], n.tree = 3000)
+s_ott_gbm <- ss[which.max(sapply(ss, function(l) cz_f1(fits.gbm,l, test$ynum)))]
+
+## Previsioni
+class.gbm <- ifelse(fits.gbm > s_ott_gbm, "yes","no")
+table(class.gbm, test$y)
+#Metriche
+gbm.metrics <- model_metrics(class.gbm, test$y)
+
+RISULTATI[3,] <- c("Modello GBM", gbm.metrics)       ## F1 score altino
+
+## Proviamo diverse profondiatà e diversi parametri di shrinkage.
+m.gbm.d2 = gbm(f.lin, data=train, 
+                 distribution="gaussian", n.trees=5000, interaction.depth=2, shrinkage = 0.05)
+fits.gbm.boost.d2 <- predict(m.gbm.d2, newdata = test[,X], n.tree = 1:5000)
+
+## Errore di previsione ul test set
+err2 = apply(fits.gbm.boost.d2, 2, function(pred) mean((test$ynum - pred)^2))
+plot(err2, type ="l")     ## L'errore si stabilizza. Qual'è il minimo?
+plot(err, type ="l") 
+
+## Forma particolare per il gbm con profondità 4
+## Vediamo le metriche nel test set.
+which.min(err2)
+fits.d2 <- predict(m.gbm.d2, newdata = test[,X], n.tree = which.min(err2))
+
+##Metriche
+s_ott_gbm <- ss[which.max(sapply(ss, function(l) cz_f1(fits.d2,l, test$ynum)))]
+
+## Previsioni
+class.gbm <- ifelse(fits.d2 > s_ott_gbm, "yes","no")
+table(class.gbm, test$y)
+#Metriche
+gbm.metrics <- model_metrics(class.gbm, test$y)
+
+## Un po' megli in termini di F1 score.
+RISULTATI[4,] <- c("Modello GBM depth 2 + 0.05", gbm.metrics)       ## F1 score altino
+
+## Modifichiamo il learning rate.
+m.gbm.d3=gbm(f.lin, data=train, 
+                 distribution="gaussian", n.trees=5000, interaction.depth=1, shrinkage=0.01)
+
+fits.gbm.boost.d3 <- predict(m.gbm.d3, newdata = test[,X], n.tree = 1:5000)
+
+## Errore di previsione ul test set
+err3 = apply(fits.gbm.boost.d3, 2, function(pred) mean((test$ynum - pred)^2))
+plot(err3, type ="l")     ## L'errore si stabilizza. Qual'è il minimo?
+plot(err, type ="l") 
+
+?gbm
+
+
+## Come si comporta nel dataset di validation?
+fits.val.gbm <- predict(m.gbm.d2, newdata = val[,X], n.tree = which.min(err2))
+
+## Soglia trovata nel test set
+s_ott_gbm
+
+## Previsioni
+class.val <- ifelse(fits.val.gbm > s_ott_gbm, "yes","no")
+table(class.val, val$y)                     ## Yo, meglio di quanto pensassi onestamente.
+#Metriche
+gbm.metrics.v <- model_metrics(class.val, val$y)
+RISULTATI
+gbm.metrics.v
+
+## Proviamo con una curva lift-roc.
+lift.roc(fits.val.gbm,val$ynum,type = "crude")
+auc(val$ynum,fits.val.gbm)
+
+```
+
+```{r Conclusioni}
+## Il lift comunque mostra buoni risultati per i nostri modelli.
+## Interpretazione dei risultati
+## Concludiamo dicendo che sarebbe necessario conoscere il metodo utilizzato per selezionare il campione da chiamare nel 2010.
+
+
+```
+
+
+
+

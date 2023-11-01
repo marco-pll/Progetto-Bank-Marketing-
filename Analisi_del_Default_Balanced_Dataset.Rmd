@@ -1,0 +1,1092 @@
+---
+title: "Default_Analisi_OverSampling"
+author: "Marco"
+date: "2023-05-21"
+output: html_document
+---
+
+```{r Librerie, include=FALSE}
+
+rm(list=ls())
+
+library(randomForest)
+library(ModelMetrics)
+library(bestglm)
+library(gam)
+library(tree)
+library(gbm)
+library(ipred)
+library(gridExtra) 
+## Caricare il file lift-roc
+setwd("C:/Users/User/Documents/DATI AZIENDALI/LAVORO DI GRUPPO")
+source("lift-roc-tab.r")
+
+```
+
+```{r Funzioni necessarie, include=FALSE}
+
+cz = function(modello, soglia, y) {
+  x1 = 1 - ModelMetrics::specificity(actual = y,predicted = modello,cutoff = soglia)
+  y1 = ModelMetrics::sensitivity(actual = y, predicted = modello,cutoff = soglia)
+  # distanza da (0,1)
+  sqrt(((0-x1)^2 + (1-y1)^2))
+}
+
+```
+
+```{r Caricamento dei dati, include=FALSE}
+setwd("C:/Users/User/Documents/DATI AZIENDALI/LAVORO DI GRUPPO/DATI")
+bank.old <- read.csv("bank-full.csv", sep=";")
+head(bank.old)
+
+```
+
+```{r Trattamento dei dati unknown, echo=FALSE}
+
+## Unknown
+unknowns <- rep(NA,length(colnames(bank.old)))
+for (i in colnames(bank.old)){
+  unknowns[colnames(bank.old) == i] <- sum(bank.old[,i] == "unknown")
+}
+names(unknowns) <- colnames(bank.old)
+unknowns
+
+## Eliminiamo gli unknown?
+#prop.table(table(bank.old$job, bank.old$default),1)  ## La modalità unknown non è predittiva (JOB)
+
+#prop.table(table(bank.old$education, bank.old$default),1) ## La modalità unknown non è predittiva (EDUCATION)
+
+
+## Eliminiamo gli unknown
+bank.old.clean <- bank.old[bank.old$job != "unknown" & bank.old$education != "unknown",]
+
+```
+
+```{r Rimozione dataset originale, include=FALSE}
+## Togliamo il dataset sporco
+rm(bank.old)
+```
+
+```{r Creazione della dummy per balance}
+
+bank.old.clean$dummy_bal = as.numeric(bank.old.clean$balance >0) # dummy balance
+bank.old.clean$dummy_bal[bank.old.clean$balance < 0] = -1
+bank.old.clean$dummy_bal = as.factor(bank.old.clean$dummy_bal)
+
+## QuantitTIVE E QUALITATIVE
+quant = c()
+qual = c()
+for (nome in colnames(bank.old.clean)){
+  if (is.numeric(bank.old.clean[,nome])){ quant = c(quant, nome)}
+  else{qual = c(qual, nome)}
+}
+
+## Character a fattori
+for (i in qual) {
+  bank.old.clean[,i] <- as.factor(bank.old.clean [,i])
+}
+
+#table (bank.old.clean$dummy_bal)
+#prop.table(table(bank.old.clean$dummy_bal, bank.old.clean$default),1)
+
+#Default numerico, serve dopo
+bank.old.clean$default.num <- as.numeric(bank.old.clean$default) - 1
+
+```
+
+```{r Dataset train - test - val}
+
+## Train e test set
+set.seed(4321)
+acaso = sample(1:nrow(bank.old.clean), .60*dim(bank.old.clean)[1])
+
+## Standardizzare le variabili quantitative
+bank.old.clean[,quant] <- scale(bank.old.clean[,quant])
+train = bank.old.clean[acaso,]
+
+## Test e validation set.
+test_e_val <- setdiff(1:nrow(bank.old.clean), acaso)
+test_set <- sample(test_e_val, 0.5*length(test_e_val))
+val_set <- setdiff(test_e_val, test_set)
+test = bank.old.clean[test_set,]
+val = bank.old.clean[val_set,]
+
+rm(acaso)
+rm(test_e_val)
+rm(test_set)
+rm(val_set)
+prop.table(table(train$default))    ## La proporzione è 1 a 100 quasi.
+
+## Grafichetto dello sbilanciamento
+unbal.df <- data.frame(prop = prop.table(table(train$default)))
+colnames(unbal.df) <- c("class","prop")
+unbal.df$prop <- round(unbal.df$prop,4)
+
+##Etichette
+unbal.df$prop.perc <- paste(unbal.df$prop*100,"%")
+
+## Grafico
+library(ggplot2)
+unbal.plot <- ggplot(data=unbal.df, aes(x=class, y=prop)) + geom_bar(stat="identity", fill = c("#F8766D","#00BFC4")) +
+  ggtitle("Distribuzione della variabile \"default\" prima") + ylab("") + geom_text(aes(label=prop.perc), vjust = -1) + ylim(0,1.05)
+unbal.plot
+                                                                              
+```
+
+```{r Dataset train bilanciato}
+
+
+##Costruzione del dataset bilanciato.
+train$id <- 1:nrow(train)
+dim(train)
+table(train$default)
+set.seed(1234)
+overSample <- sample(train$id[train$default == "yes"], 1000, replace = TRUE)
+underSample <- sample(train$id[train$default == "no"], 10000, replace = FALSE)
+
+## Dataset ridotto
+train.bal <- as.data.frame(train[train$id == overSample[1],])
+
+for (i in 2:length(overSample)) {
+  train.bal[i,] <- train[train$id == overSample[i],]
+}
+
+## Aggiungiamo i default no.
+train.bal <- rbind(train.bal, train[train$id %in% underSample,])
+
+table(train.bal$default)   ## Bilanciato meglio
+## Perfetto.
+
+
+bal.df <- data.frame(prop = prop.table(table(train.bal$default)))
+colnames(bal.df) <- c("class","prop")
+bal.df$prop <- c(0.9,0.1)
+bal.df$prop <- round(bal.df$prop,4)
+
+##Etichette
+bal.df$prop.perc <- paste(bal.df$prop*100,"%")
+
+## Grafico
+library(ggplot2)
+bal.plot <- ggplot(data=bal.df, aes(x=class, y=prop)) + geom_bar(stat="identity", fill = c("#F8766D","#00BFC4")) +
+  ggtitle("Distribuzione della variabile \"default\" dopo") + ylab("") + geom_text(aes(label=prop.perc), vjust = -1) + ylim(0,1.05)
+bal.plot
+```
+
+```{r Modelli}
+ 
+X = c("loan", "housing","education", "marital", "job", "dummy_bal", "age", "balance")
+
+## Le soglie
+ss <- seq(0.001, 0.3, length = 200)
+
+```
+
+```{r GLM}
+
+## Selezione del modello migliore sulla base dell'AIC.
+f.bin <- formula(paste("default~",paste(X, collapse = " + ")))
+
+
+## Modello logistico di partenza
+m.log.null <- glm(default~1,family=binomial, data=train.bal)
+m.log.step <- step(m.log.null, scope=f.bin, direction="both")
+
+summary(m.log.step)
+
+fits.glm0 <- predict(m.log.step, newdata = test[,X], type="response") # Previsione delle probabilità
+
+# Scegliere la soglia.
+str(test)
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.glm0,l,test$default.num)))]
+
+
+
+## Nel validation set invece.
+fits.glm0 <- predict(m.log.step, newdata = val, type="response")
+class.log <- ifelse(fits.glm0 > s_ott, "yes","no")
+
+table(class.log, val$default)
+
+accuracy <- sum(class.log == val$default)/nrow(val)
+
+falsi_pos <- sum(class.log == "yes" & val$default == "no")
+falsi_neg <- sum(class.log == "no" & val$default == "yes")
+true_pos <- sum(class.log == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+
+glm.val <- as.data.frame(t(as.matrix(c("GLM",s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1))))
+colnames(glm.val) <- c("Modello","Soglia", "FP", "FN", "Accuracy", "Recall", "Precision", "F1")
+
+
+BEST_MODELS <- as.data.frame(glm.val)
+```
+
+```{r Modello lineare}
+
+f.lin <- formula(paste("default.num~",paste(X, collapse = " + ")))
+
+  
+## Modello lineare stepwise
+m.lin.null <- lm(default.num~1, data=train.bal)
+m.lin.step <- step(m.lin.null, scope=f.lin, direction ="both")
+
+## Previsione sul test set per cercare una sogli ottimale.
+fits.lin <- predict(m.lin.step, newdata = test)
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.lin,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set
+fits.lin <- predict(m.lin.step, newdata = val)
+
+## Soglia ottimale.
+class <- ifelse(fits.lin > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+model.lin <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[2,] <- c("Lineare",model.lin)
+```
+
+```{r Modello GAM}
+
+## Costruzione della formula
+X.qual <- X[X %in% qual]
+X.quant <- X[!X %in% qual]
+
+#Formula
+f.gam <- formula(paste("default ~",paste(c(X.qual,paste(paste0("s(",X.quant,")"), collapse = " + ")),collapse=" + ")))
+m.gam <- gam(f.gam, data=train.bal, family = binomial)
+summary(m.gam)
+
+## Cerco la soglia nel test set
+fits.gam <- predict(m.gam, test[,X], type="response")
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.gam,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set
+fits.gam <- predict(m.gam, val[,X], type="response")
+
+class <- ifelse(fits.gam > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+model.gam <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[3,] <- c("GAM",model.gam)
+
+```
+
+```{r Albero di classificazione}
+## Training set e test set.
+## SUddividiamo il training set in 2 parti.
+
+set.seed(1234)
+cb1 <- sample(1:nrow(train.bal), 0.5*nrow(train.bal))
+cb2 <- setdiff(1:nrow(train.bal), cb1)
+
+
+## Training nel training set.
+m.tree <- tree(f.bin, data=train.bal[,c("default",X)],
+               split = "deviance",
+               control=tree.control(nobs=nrow(train.bal),
+                                    mincut = 20,
+                                    mindev=0.0001))
+
+#Pruning sul test set.
+#prune.tree.1= prune.tree(m.tree, newdata=train.bal[cb2,c("default",X)])
+prune.tree.1= prune.tree(m.tree, newdata=test[,c("default",X)])
+plot(prune.tree.1)
+abline(v=prune.tree.1$size[which.min(prune.tree.1$dev)], col="red")
+
+#Albero migliore identificato e ottenuto
+opt_size <- prune.tree.1$size[which.min(prune.tree.1$dev)]
+m.tree.1 <- prune.tree(m.tree, best = opt_size)
+
+plot(m.tree.1)
+text(m.tree.1, pretty =2)
+
+
+## Cerco la soglia ottimale.
+fits.tree <- predict(m.tree.1, test[,X])[,2]
+head(fits.tree)
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.tree,l, as.numeric(test$default)-1)))]
+
+## Previsione sul validation set.
+fits.tree <- predict(m.tree.1, val[,X])[,2]
+
+class <- ifelse(fits.tree > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+model.tree <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[4,] <- c("Tree",model.tree)
+
+```
+
+```{r Gradient boosting}
+n = 600
+# model.gb =gbm(default.num ~ ., data=train.bal[,c("default.num",X)], 
+#                  distribution="bernoulli", n.trees=n, interaction.depth=2, shrinkage = .05)
+
+## Modello migliore.
+ model.gb =gbm(default.num ~ ., data=train.bal[,c("default.num",X)], 
+                  distribution="bernoulli", n.trees=n, interaction.depth=1, shrinkage = .05)
+
+summary(model.gb)
+#grafico con gli errori di previsione sull'insieme di stima
+plot(model.gb$train.error, type="l", ylab="training error")
+
+
+## Studiare l'errore di previsione al variare degli alberi utilizzati
+yhat.boost = predict(model.gb, newdata=test, n.trees=1:n)
+
+##Errore nel test set
+#err = apply(yhat.boost, 2, function(pred) mean((test$default.num - pred)^2))
+#plot(err, type ="l") 
+
+## Utilizziamo un altro metodo per capire le prestazioni del modello.
+F1_score <- function(x) {
+  S_ott <- ss[which.min(sapply(ss, function(l) cz(x,l, as.numeric(test$default)-1)))]
+  class <- ifelse(x > S_ott, "yes","no")
+  falsi_pos <- sum(class == "yes" & test$default == "no")
+  falsi_neg <- sum(class == "no" & test$default == "yes")
+  true_pos <- sum(class == "yes" & test$default == "yes")
+  
+  recall <- true_pos / (true_pos + falsi_neg)
+  precision <- true_pos / (true_pos + falsi_pos)
+  
+  f1 <- 2/(1/precision + 1/recall)
+  print(rnorm(1))   ## Gran comando per vedere se l'algoritmo avanza.
+  return(f1)
+}
+
+err = apply(yhat.boost, 2, F1_score)
+plot(err, type="l")
+
+## Soglia ottimale
+fits.gb = predict(model.gb, newdata=test, type = "response", n.trees = which.max(err))
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.gb,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set.
+fits.gb = predict(model.gb, newdata=val, type = "response", n.trees = which.max(err))
+
+class <- ifelse(fits.gb > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+model.gboost <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[10,] <- c("Gradient Boosting",model.gboost)
+
+## Non è il modello migliore in questo caso.
+## E' venuto bene
+
+```
+
+```{r Modello MARS}
+library(earth)
+m.mars <- earth(f.lin, data = train.bal, degree = 2, nk = 150)
+
+##Soglia ottimale
+fits.mars <- predict(m.mars,test[,X])
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.mars,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set.
+fits.mars = predict(m.mars, newdata=val, type = "response")
+
+class <- ifelse(fits.mars > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+model.mars <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[5,] <- c("MARS",model.mars)
+
+?earth
+
+summary(m.mars)
+# plotmo(m.mars,degree1=T, degree2=F, do.par=F)
+# plotmo(m.mars,degree1=F, degree2=T, do.par=F)
+
+
+```
+
+```{r MARS CON POLSPLINE}
+library(polspline)
+#Con specifica dei test set e validation set. Non usa la gcv in questo caso.
+# m.mars <- polymars(responses = train.bal$default,
+#                    predictors = train.bal[,X],
+#                    ts.resp = test$default,
+#                    ts.pred = test[,X],
+#                    factors = which(X %in% qual),
+#                    classify = FALSE)
+
+
+m.mars <- polymars(responses = train.bal$default.num,
+                   predictors = train.bal[,X],
+                   factors = which(X %in% qual), maxsize = 100)
+
+n = nrow(train.bal)
+def.size <- min(6*(n^(1/3)),n/4,100)
+
+## Scelta basata sulla gcv
+m.mars$model.size
+
+?polymars
+## Rappresentazione fragica del processo di selezione
+m.mars$fitting
+plot(m.mars$fitting$size, m.mars$fitting$GCV, col = m.mars$fitting$`0/1` + 1)
+abline(v = m.mars$fitting$size[which.min(m.mars$fitting$GCV)], col = "lightblue")
+
+
+
+## Come sono le previsioni?
+
+##Soglia ottimale
+fits.mars <- predict(m.mars,test[,X])
+head(fits.mars)
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.mars,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set.
+fits.mars = predict(m.mars,val[,X])
+
+class <- ifelse(fits.mars > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+model.mars <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[6,] <- c("MARS - polspline",model.mars)
+
+```
+
+```{r Modello Bagging}
+
+## Dovremmo fare una procedura di selezione del numero di alberi ottimale.
+## Provvedo subito
+
+n <-1:20
+results <- NULL
+
+for (i in n) {
+  print(i*10)
+  #m.bag <- bagging(f.bin, data = train.bal[cb1,], nbagg = i*10)
+  m.bag <- bagging(f.bin, data = train.bal, nbagg = i*10)
+  #fits.bag <- predict(m.bag, train.bal[cb2,], type ="prob")[,2]
+  fits.bag <- predict(m.bag, test, type ="prob")[,2]
+  #s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.bag,l, train.bal$default.num[cb2])))]
+  s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.bag,l, test$default.num)))]
+  class <- ifelse(fits.bag > s_ott, "yes","no")    ## Classificazione
+  
+  ##Metriche
+  #accuracy <- sum(class == train.bal$default[cb2])/length(cb2)
+  accuracy <- sum(class == test$default)/nrow(train.bal)
+  
+  #falsi_pos <- sum(class == "yes" & train.bal$default[cb2] == "no")
+  falsi_pos <- sum(class == "yes" & test$default == "no")
+  #falsi_neg <- sum(class == "no" & train.bal$default[cb2] == "yes")
+  falsi_neg <- sum(class == "no" & test$default == "yes")
+  #true_pos <- sum(class == "yes" & train.bal$default[cb2] == "yes")
+  true_pos <- sum(class == "yes" & test$default == "yes")
+  
+  recall <- true_pos / (true_pos + falsi_neg)
+  precision <- true_pos / (true_pos + falsi_pos)
+  
+  f1 <- 2/(1/precision + 1/recall)
+  
+  ##Salviamo le metriche
+  model.bag <- c(i*10,s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+  
+  results <- rbind(results, model.bag)
+}
+colnames(results) <- colnames(BEST_MODELS)
+
+m.bag <- bagging(f.bin, data = train.bal, nbagg = results[,1][which.max(results[,8])])
+#Per la previsione
+fits.bag <- predict(m.bag, test, type ="prob")[,2]
+head(fits.bag)
+
+
+## Soglia ottimale
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.bag,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set.
+fits.bagg = predict(m.bag, newdata=val, type = "prob")[,2]
+
+class <- ifelse(fits.bagg > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+model.bagg <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[7,] <- c("Bagging - 500 Alberi",model.bagg)
+
+## Non è venuto meglio sul test set.
+
+
+```
+
+```{r Random Forest, eval=FALSE, include=FALSE}
+library(randomForest) 
+
+## Scelta del parametro di regolazione corretto.
+oob = NULL
+F = 1:7
+for(f in F){
+  rfModel = randomForest(y = train.bal$default, x = train.bal[,X], mtry = f, ntree=150, do.trace=50)
+  oob = rbind(oob, c("f"=f, "err.OOB"=rfModel$err.rate[nrow(rfModel$err.rate),1]))
+}
+
+
+#Ci salviamo l'errore out-of-bootstrap
+#Lo usiamo per trovare un modello ottimale
+plot(oob, xlab="variabili campionate", ylab="Errore OOB", type="b")
+abline(v=F[which.min(oob[,2])], col=4)
+
+## Foresta casule finale
+set.seed(1234)
+m.rf <- randomForest(f.bin, data = train.bal, mtry = F[which.min(oob[,2])], ntree = 350, do.trace = 50)
+
+## Metriche
+fits.rf <- predict(m.rf, test, type ="prob")[,2]
+head(fits.rf)
+
+
+## Soglia ottimale
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.rf,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set.
+fits.rf = predict(m.rf, newdata=val, type = "prob")[,2]
+
+class <- ifelse(fits.rf > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+table(class, val$default)
+
+model.rf <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[8,] <- c("Random forest - 300 Alberi",model.rf)
+```
+
+```{r Random Forest}
+## E se il modello migliore venisse selezionato sulla base dell'F1?
+
+oob = NULL
+F = 1:8
+nsets <- 10
+f1s <- matrix(NA, nrow=length(F), ncol=nsets)
+
+set.seed(111)
+cv_rf <- function () {
+  
+  order <- sample(1:nrow(train.bal), nrow(train.bal))
+  dim_subset <- floor(nrow(train.bal)/nsets)
+  for (i in 1:nsets) {
+    test_set <- ((i-1)*dim_subset + 1):(i*dim_subset)
+    train_set <- order[-test_set]
+    test_set <- order[test_set]
+    
+    for (f in F) {
+      rfModel = randomForest(y = train.bal$default[train_set], x = train.bal[train_set,X], mtry = f, ntree=200, do.trace=50)
+      fits.rf <- predict(rfModel, train.bal[test_set,X], type ="prob")[,2]
+      p1n <- fits.rf > ss[which.min(sapply(ss, function(l) cz(fits.rf,l,train.bal$default.num[test_set])))]
+      p1n <- ifelse(p1n == TRUE,1,0)
+      
+      true.pos <- sum(p1n==1 & train.bal$default[test_set]=="yes")
+      false.pos <- sum(p1n==1 & train.bal$default[test_set]=="no")
+      false.neg <- sum(p1n==0 &  train.bal$default[test_set]=="yes")
+      prec.n1 <- true.pos/(true.pos + false.pos)
+      recall.n1 <- true.pos/(true.pos + false.neg)
+      f1.n1 <- 2*prec.n1*recall.n1/(prec.n1+recall.n1)
+      
+      f1s[F==f, i] <- f1.n1
+    }
+  }
+  
+  return(f1s)
+}
+
+set.seed(3232)
+train_set <- sample(1:nrow(train.bal),0.9*nrow(train.bal))
+rfModel = randomForest(y = train.bal$default[train_set], x = train.bal[train_set,X], mtry = 5, ntree=200, do.trace=50)
+
+fits.rf <- predict(rfModel, train.bal[-train_set,X], type ="prob")[,2]
+p1n <- fits.rf > ss[which.min(sapply(ss, function(l) cz(fits.rf,l,train.bal$default.num[-train_set])))]
+
+true.pos <- sum(p1n==1 & train.bal$default[-train_set]=="yes")
+      false.pos <- sum(p1n==1 & train.bal$default[-train_set]=="no")
+      false.neg <- sum(p1n==0 &  train.bal$default[-train_set]=="yes")
+      prec.n1 <- true.pos/(true.pos + false.pos)
+      recall.n1 <- true.pos/(true.pos + false.neg)
+      f1.n1 <- 2*prec.n1*recall.n1/(prec.n1+recall.n1)
+
+f1s_returned <- cv_rf()
+
+
+
+f1s_mean <- apply(f1s_returned,1,mean)
+plot(f1s_mean~F)
+abline(v=F[which.max(f1s_mean)], col = "blue")
+##Ottenuto lo stesso risultato. Teniamo il 6.
+```
+
+```{r Random Forest finale}
+
+m.rf <- randomForest(f.bin, data = train.bal, mtry = F[which.max(f1s_mean)], ntree = 300, do.trace = 50)
+
+## Metriche
+fits.rf <- predict(m.rf, test, type ="prob")[,2]
+head(fits.rf)
+
+
+## Soglia ottimale
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.rf,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set.
+fits.rf = predict(m.rf, newdata=val, type = "prob")[,2]
+
+class <- ifelse(fits.rf > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+table(class, val$default)
+lift.roc(fits.rf,val$default.num,type = "crude")
+
+model.rf <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[8,] <- c("Random forest - 300 Alberi",model.rf)
+```
+
+```{r AdaBoosting}
+
+library(ada)
+## Regolazione nel boosting
+
+n <-1:20
+results <- NULL
+
+for (i in n) {
+  print(i*10)
+  #m.bag <- bagging(f.bin, data = train.bal[cb1,], nbagg = i*10)
+  m.ada <- ada(f.lin, data = train.bal,iter = i*10,
+              rpart.control(maxdepth=2,cp=-1,minsplit=0,xval=0))
+  #fits.bag <- predict(m.bag, train.bal[cb2,], type ="prob")[,2]
+  fits.ada <- predict(m.ada, test, type ="prob")[,2]
+  #s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.bag,l, train.bal$default.num[cb2])))]
+  s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.ada,l, test$default.num)))]
+  class <- ifelse(fits.ada > s_ott, "yes","no")    ## Classificazione
+  
+  ##Metriche
+  #accuracy <- sum(class == train.bal$default[cb2])/length(cb2)
+  accuracy <- sum(class == test$default)/nrow(train.bal)
+  
+  #falsi_pos <- sum(class == "yes" & train.bal$default[cb2] == "no")
+  falsi_pos <- sum(class == "yes" & test$default == "no")
+  #falsi_neg <- sum(class == "no" & train.bal$default[cb2] == "yes")
+  falsi_neg <- sum(class == "no" & test$default == "yes")
+  #true_pos <- sum(class == "yes" & train.bal$default[cb2] == "yes")
+  true_pos <- sum(class == "yes" & test$default == "yes")
+  
+  recall <- true_pos / (true_pos + falsi_neg)
+  precision <- true_pos / (true_pos + falsi_pos)
+  
+  f1 <- 2/(1/precision + 1/recall)
+  
+  ##Salviamo le metriche
+  model.ada <- c(i*10,s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+  
+  results <- rbind(results, model.ada)
+}
+
+colnames(results) <- colnames(BEST_MODELS)
+
+##Modello finale
+m.ada <- ada(f.lin, data = train.bal,iter = results[,1][which.max(results[,8])],
+              rpart.control(maxdepth=2,cp=-1,minsplit=0,xval=0))
+ 
+fits.ada <- predict(m.ada, test, type ="prob")[,2]
+head(fits.ada)
+
+
+## Soglia ottimale
+s_ott <- ss[which.min(sapply(ss, function(l) cz(fits.ada,l, as.numeric(test$default)-1)))]
+
+## Previsioni nel validation set.
+fits.ada = predict(m.ada, newdata=val, type = "prob")[,2]
+
+class <- ifelse(fits.ada > s_ott, "yes","no")
+  
+accuracy <- sum(class == val$default)/nrow(val)
+  
+falsi_pos <- sum(class == "yes" & val$default == "no")
+falsi_neg <- sum(class == "no" & val$default == "yes")
+true_pos <- sum(class == "yes" & val$default == "yes")
+  
+recall <- true_pos / (true_pos + falsi_neg)
+precision <- true_pos / (true_pos + falsi_pos)
+  
+f1 <- 2/(1/precision + 1/recall)
+
+table(class, val$default)
+lift.roc(fits.ada,val$default.num,type = "crude")
+
+model.ada <- c(s_ott, falsi_pos, falsi_neg, accuracy, recall, precision, f1)
+
+BEST_MODELS[9,] <- c("ADA Boosting",model.ada)
+
+library(rpart)
+varplot(m.ada)    ##Eccolo qua il plot dell'importanze
+??importanceplot
+```
+
+```{r Salvando i risultati}
+BEST_MODELS_sort <- BEST_MODELS[order(BEST_MODELS$F1,decreasing=TRUE),]
+for( i in 2:ncol(BEST_MODELS_sort)){
+  BEST_MODELS_sort[,i] <- as.numeric(BEST_MODELS_sort[,i])
+}
+
+for( i in 2:ncol(BEST_MODELS_sort)){
+  BEST_MODELS_sort[,i] <- round(BEST_MODELS_sort[,i],3)
+}
+
+BEST_MODELS_sort[,c(2,3,4)] <- NULL
+
+write.table(BEST_MODELS_sort, file = file.choose(),sep=";")
+
+```
+
+```{r Importanza delle variabili}
+
+
+summary(model.gb)   ## L'importamza delle variabili
+var.imp <- summary(model.gb)   ## Salvato l'importanza delle variabili
+
+## Facciamo un grafico delle prime 7. Non sono caratteristiche personali.
+library(viridis)
+cols <- inferno(8)
+var.imp.df <- as.data.frame(var.imp)
+colnames(var.imp.df) <- c("var","importanza")
+rownames(var.imp.df) <- NULL
+var.imp.df$var[1] <- c("saldo")
+var.imp.df$var[2] <- c("dummy del saldo")
+
+var.imp.df <- var.imp.df[order(var.imp.df$importanza, decreasing = FALSE),]
+var.imp.df$var <- factor(var.imp.df$var,levels = var.imp.df$var)
+
+
+## Facciamo i 2 plot
+library(ggplot2)
+var.imp.plot <- ggplot(data=var.imp.df, aes(x=var,y=importanza)) + geom_bar(stat="identity",fill=rev(cols)) + coord_flip() + xlab("") + ylab("Importanza relativa") + ggtitle("Importanza relativa delle variabili (gbm)")
+var.imp.plot
+
+```
+
+```{r Interpretazione}
+
+## Interpretiamo rispetto al GAM quindi.
+formula(m.gam)
+summary(m.gam)
+
+
+## Grafico delle variabili quantitative.
+par(mfrow=c(1,2))
+plot(m.gam,terms = c("s(balance)"),se=TRUE, main = "", lwd = 1.5, xlab ="Saldo", ylab="s(saldo)")
+abline(h=0, col = "darkgrey", lty ="dotdash")
+
+##
+plot(m.gam,terms = "s(age)",se=T, main = "", xlab="Età", ylab="s(età)")
+abline(h=0, col = "darkgrey", lty ="dotdash")
+
+
+## Facciamo i grafici degli effetti delle qualitative.
+plot(m.gam,terms = c("loan", "housing", "education", "marital","job","dummy_bal"),se=T)
+?plot
+table(train.bal$loan)
+
+
+```
+
+```{r Grafici di lavoro}
+## Lavoro
+job.effects <- m.gam$coefficients[8:17]
+job.effects <- c(job.effects, 0.02)
+names(job.effects)[length(job.effects)] <- "jobadmin"
+
+#Puliamo i nomi.
+
+names(job.effects) <- gsub("job","",names(job.effects))
+
+
+## GGplot
+library(ggplot2)
+colors <- c("#2166AC","#4393C3","#92C5DE","#D1E5F0","#FFFFCC","#FD8D3C","#FC4E2A","#BD0026","#800026")
+
+#Costruiamo un data.frame
+job.effects.df <- data.frame(Lavori = names(job.effects), Effetti = job.effects)
+job.effects.df <- job.effects.df[order(job.effects.df$Effetti,decreasing = FALSE),]
+job.effects.df$Lavori <- factor(job.effects.df$Lavori, levels = job.effects.df$Lavori)
+rownames(job.effects.df) <- NULL
+
+
+## Barplot con gli effettia esponente
+job.effects.df$Effetti.exp <- exp(job.effects.df$Effetti) - 1
+
+
+job.effects.df$Effetti.exp.perc <- paste(round(job.effects.df$Effetti.exp,2)*100,"%")
+job.effects.df$Effetti.exp.perc[2] <- ""
+
+cols <- inferno(11)
+job.barplot.exp <-ggplot(data=job.effects.df, aes(x=Lavori, y = Effetti.exp)) +
+  geom_bar(stat="identity", fill = rev(c(cols[2:11],"#4393C3"))) + coord_flip() + ggtitle("Effetti del lavoro sulla quota") +
+  ylab("") + xlab("") + geom_text(aes(label = Effetti.exp.perc), hjust=-0.2, color = "black") +
+  scale_y_continuous(limits=c(-0.75,2.85))
+job.barplot.exp
+
+```
+
+```{r Grafici di education}
+
+##Educazione
+educ_effects <- m.gam$coefficients[4:5]
+educ_effects <- c(0.005,educ_effects)
+names(educ_effects)[1] <- "educationprimary"
+
+#Pulisco i nomi
+names(educ_effects) <- gsub("education","",names(educ_effects))
+
+# Data.frame per il grafico.
+educ_effects_df <- data.frame(Educazione = names(educ_effects), Effetti = educ_effects)
+educ_effects_df$Educazione <- factor(educ_effects_df$Educazione, levels = educ_effects_df$Educazione)
+educ_effects_df$effects.exp <- exp(educ_effects_df$Effetti) - 1
+educ_effects_df$effects.exp.perc <- paste(round(educ_effects_df$effects.exp,2),"%")
+educ_effects_df$effects.exp.perc[1] <- ""
+rownames(educ_effects_df) <- NULL
+
+## Grafico
+
+#Colori
+library(RColorBrewer)
+YlOrRd <- brewer.pal(9,"YlOrRd")[c(2,6)]
+YlOrRd <- c(YlOrRd, brewer.pal(9,"RdBu")[7])
+
+
+educ.plot <-ggplot(data=educ_effects_df, aes(x=Educazione, y = effects.exp)) +
+  geom_bar(stat="identity", fill = c("#FFFFCC","#FD8D3C","#92C5DE")) + coord_flip() + ggtitle("Effetto dell'educazione sulla quota") + ylab("") + xlab("") + 
+  geom_text(aes(label = effects.exp.perc), hjust=-0.3, color = "black") + scale_y_continuous(limits = c(-0.24,0.16))
+educ.plot
+
+colors <- c("#2166AC","#4393C3","#92C5DE","#D1E5F0","#FFFFCC","#FD8D3C","#FC4E2A","#BD0026","#800026")
+
+```
+
+```{r Grafici di education}
+
+## Stato maritale
+mar_effects <- m.gam$coefficients[6:7]
+mar_effects <- c(0.002,mar_effects)
+names(mar_effects)[1] <- "maritaldivorced"
+
+#Pulisco i nomi
+names(mar_effects) <- gsub("marital","",names(mar_effects))
+mar_effects <- sort(mar_effects, decreasing =TRUE)
+
+# Data.frame per il grafico.
+mar_effects_df <- data.frame(Stato_civile = names(mar_effects), Effetti = mar_effects)
+mar_effects_df$Stato_civile <- factor(mar_effects_df$Stato_civile, levels = mar_effects_df$Stato_civile)
+mar_effects_df$Effetti.exp <- exp(mar_effects_df$Effetti) - 1
+mar_effects_df$Effetti.exp.perc <- paste(round(mar_effects_df$Effetti.exp,2)*100,"%")
+mar_effects_df$Effetti.exp.perc[1] <- ""
+
+rownames(mar_effects_df) <- NULL
+
+## Grafico
+
+#Colori
+YlOrRd <- brewer.pal(9,"Blues")[c(2,4,7)]
+
+colors <- c("#2166AC","#4393C3","#92C5DE","#D1E5F0","#FFFFCC","#FD8D3C","#FC4E2A","#BD0026","#800026")
+
+mar.barplot <-ggplot(data=mar_effects_df, aes(x=Stato_civile, y = Effetti.exp)) +
+  geom_bar(stat="identity", fill = colors[c(5,4,3)]) + coord_flip() + ggtitle("Effetto dello stato civile sulla quota") + ylab("") + xlab("") + 
+  geom_text(aes(label = Effetti.exp.perc), hjust=-0.5, color = "black")
+
+
+mar.barplot
+```
+
+```{r Grafici}
+## Dummy del saldo.
+bal_effects <- m.gam$coefficients[18:19]
+bal_effects <- c(-0.02,bal_effects)
+names(bal_effects) <- c("Saldo negativo","Saldo 0","Saldo positivo")
+
+
+# Data.frame per il grafico.
+bal_effects_df <- data.frame(saldo = names(bal_effects), Effetti = bal_effects)
+bal_effects_df$saldo <- factor(bal_effects_df$saldo, levels = bal_effects_df$saldo)
+
+rownames(bal_effects_df) <- NULL
+
+#Colori
+bal_effects_df$effetti.exp <- exp(bal_effects_df$Effetti) - 1
+bal_effects_df$effetti.exp.perc <- paste(round(bal_effects_df$effetti.exp,2)*100,"%")
+bal_effects_df$effetti.exp.perc[1] <- ""
+
+
+bal.barplot <-ggplot(data=bal_effects_df, aes(x=saldo, y = effetti.exp)) +
+  geom_bar(stat="identity", fill=colors[c(5,3,2)]) + coord_flip() + ggtitle("Effetti del saldo sulla quota") + ylab("") + xlab("") + 
+  geom_text(aes(label = effetti.exp.perc), hjust=-0.5, color = "black")
+
+bal.barplot
+```
+
+```{r Grafici mutuo + loan}
+## Mutuo
+hous_effects <- m.gam$coefficients[2:3]
+names(hous_effects) <- c("Prestito personale (loan)","Mutuo sulla casa (housing)")
+
+#Pulisco i nomi
+
+
+# Data.frame per il grafico.
+hous_effects_df <- data.frame(prestito = names(hous_effects), Effetti = hous_effects)
+hous_effects_df$prestito <- factor(hous_effects_df$prestito, levels = hous_effects_df$prestito)
+hous_effects_df$effetti.exp <- exp(hous_effects_df$Effetti) - 1
+hous_effects_df$effetti.exp.perc <- paste(round(hous_effects_df$effetti.exp,2)*100,"%")
+
+rownames(hous_effects_df) <- NULL
+
+
+
+house.loan.barplot <-ggplot(data=hous_effects_df, aes(x=prestito, y = effetti.exp)) +
+  geom_bar(stat="identity", fill = colors[c(6,3)]) + coord_flip() + ggtitle("Effetti dei prestiti sulla quota") + 
+  ylab("") + xlab("") + scale_y_continuous(limits = c(-0.32,0.7))  + 
+  geom_text(aes(label = effetti.exp.perc), hjust=-0.2, color = "black")
+  
+
+house.loan.barplot
+
+```
+
+```{r Utilizzo dei dati per l'analisi delle risposte}
+
+##Dataset principale
+setwd("C:/Users/User/Documents/DATI AZIENDALI/LAVORO DI GRUPPO/DATI/bank-additional")
+bank <- read.csv("bank-additional-full.csv", sep =";")
+str(bank)
+str(bank.old.clean)
+bank <- bank[bank$default !="yes",]
+
+
+##Vediamo rispetto alle distribuzioni condizionate.
+ggplot(bank,aes(x=age)) + geom_histogram(aes(y = stat(density))) + facet_grid(~default)+theme_bw()
+ggplot(bank,aes(x=job)) + geom_bar() + facet_grid(~default)+theme_bw()    ## Meno admins e technicians
+ggplot(bank,aes(x=job)) + geom_bar(aes(y = ..count.. / sapply(PANEL, FUN=function(x) sum(count[PANEL == x])))) + facet_grid(~default)+theme_bw() + ylab("Frequenze relative")
+## Distribuzione relativa.
+
+ggplot(bank,aes(x=education)) + geom_bar() + facet_grid(~default)+theme_bw()   ## Molti meno individui con livelli di istruzione alta tra gli unknown.
+ggplot(bank,aes(x=education)) + geom_bar(aes(y = ..count.. / sapply(PANEL, FUN=function(x) sum(count[PANEL == x])))) + facet_grid(~default)+theme_bw() + ylab("Frequenze relative")
+
+ggplot(bank,aes(x=housing)) + geom_bar() + facet_grid(~default)+theme_bw()
+ggplot(bank,aes(x=loan)) + geom_bar() + facet_grid(~default)+theme_bw()     ##Non ci sono differenze in questi termini
+```
+
+```{r Plot}
+educ.plot
+mar.barplot
+job.barplot.exp
+bal.barplot
+house.loan.barplot
+
+```
+
+
+

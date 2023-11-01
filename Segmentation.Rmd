@@ -1,0 +1,370 @@
+---
+title: "Segmentation"
+author: "Marco"
+date: "2023-06-09"
+output: html_document
+---
+
+```{r}
+rm(list=ls())
+```
+
+```{r Librerie}
+library(randomForest)
+library(ModelMetrics)
+library(bestglm)
+library(gam)
+library(tree)
+library(gbm)
+library(ipred)
+library(gridExtra)
+library(MASS)
+library(ipred)
+library(dplyr)
+library(caret)
+library(tidyverse)
+library(cluster)
+library("flexclust")
+```
+
+```{r Dati}
+setwd("C:/Users/User/Documents/DATI AZIENDALI/LAVORO DI GRUPPO/DATI/bank-additional")
+bank <- read.csv("bank-additional-full.csv", sep =";")
+str(bank)
+
+```
+
+```{r Pulizia - Togliere gli unknown}
+unknowns <- rep(NA,length(colnames(bank)))
+for (i in colnames(bank)){
+  unknowns[colnames(bank) == i] <- sum(bank[,i] == "unknown")
+}
+names(unknowns) <- colnames(bank)
+unknowns
+
+## Togliamo tutti gli unknown per fare una prova.
+bank.clean <- bank[bank$job != "unknown" & bank$marital != "unknown" & bank$education != "unknown" & bank$housing != "unknown",]
+
+## Tolte circa 3000 osservazioni.
+```
+
+```{r Pulizia - Variabili}
+
+
+quant = c()
+qual = c()
+for (nome in colnames(bank.clean)){
+  if (is.numeric(bank.clean[,nome])){ quant = c(quant, nome)}
+  else{qual = c(qual, nome)}
+}
+
+## Character a fattori
+for (i in qual) {
+  bank.clean[,i] <- as.factor(bank.clean [,i])
+}
+
+str(bank.clean)
+```
+
+```{r Raggruppamento dei livelli}
+## Queste sono le variabili di interesse per l'analisi.
+X <- c("age","job","marital","education","default","housing","loan","poutcome")
+str(bank.clean[,X])
+
+## Semplifichiamo intanto il lavoro svolto.
+table(bank.clean$job)
+job.rid <- rep(NA,nrow(bank.clean))
+
+## Management, entrepreneur e self_employed li mettiamo nel gruppo "Dirigenziale"
+job.rid <- ifelse(bank.clean$job == "entrepreneur", "dirigenziale",job.rid)
+job.rid <- ifelse(bank.clean$job == "management", "dirigenziale",job.rid)
+job.rid <- ifelse(bank.clean$job == "self-employed", "dirigenziale",job.rid)
+
+## Studenti, casalinghe, retired e unemployed li mettiamo nel gruppo dei "non occupati".
+job.rid <- ifelse(bank.clean$job == "housemaid", "non occupati",job.rid)
+job.rid <- ifelse(bank.clean$job == "retired", "non occupati",job.rid)
+job.rid <- ifelse(bank.clean$job == "student", "non occupati",job.rid)
+job.rid <- ifelse(bank.clean$job == "unemployed", "non occupati",job.rid)
+
+##Technician e blue-collar in "lavoro manuale".
+job.rid <- ifelse(bank.clean$job == "blue-collar", "lavoro manuale",job.rid)
+job.rid <- ifelse(bank.clean$job == "technician", "lavoro manuale",job.rid)
+
+##Admin in impiegato
+job.rid <- ifelse(bank.clean$job == "admin.", "impiegatizio",job.rid)
+##Services in servizi, lasciamolo a se per il momento
+job.rid <- ifelse(bank.clean$job == "services", "servizi",job.rid)
+
+
+sum(table(job.rid))
+sum(table(bank.clean$job))
+table(bank.clean$job)
+table(job.rid)
+
+##E il lavoro è sistemato
+## Educazione
+table(bank.clean$education)
+
+## Professional.course e university degree mettiamo in educazione alta
+educ.rid <- rep(NA,nrow(bank.clean))
+
+## Corso professionale e università li mettiamo in educazione alta.
+educ.rid <- ifelse(bank.clean$education == "professional.course", "educ_alta",educ.rid)
+educ.rid <- ifelse(bank.clean$education == "university.degree", "educ_alta",educ.rid)
+
+##Illiterate-basic.9y li mettiamo in educazione bassa
+educ.rid <- ifelse(bank.clean$education == "illiterate", "educ_bassa",educ.rid)
+educ.rid <- ifelse(bank.clean$education == "basic.4y", "educ_bassa",educ.rid)
+educ.rid <- ifelse(bank.clean$education == "basic.6y", "educ_bassa",educ.rid)
+educ.rid <- ifelse(bank.clean$education == "basic.9y", "educ_bassa",educ.rid)
+
+##Diploma la mettiamo in media
+educ.rid <- ifelse(bank.clean$education == "high.school", "educ_media",educ.rid)
+
+table(bank.clean$education)
+table(educ.rid)
+
+## Mettiamo nel dataset le variabili
+bank.clean$educazione <- factor(educ.rid)
+bank.clean$lavoro <- factor(job.rid)
+str(bank.clean)
+
+
+##Risolviamo anche quei 3 default che abbiamo osservato.
+table(bank.clean$default)
+bank.clean <- bank.clean[bank.clean$default != "yes",]
+bank.clean$default <- factor(bank.clean$default)
+X <- c("age","lavoro","marital","educazione","default","housing","loan","poutcome")
+
+##Previous outcome come si comporta?
+table(bank.clean$poutcome)     ##Lasciamo così.
+
+bank.segm <- bank.clean[,X]
+str(bank.segm)
+```
+
+```{r Le variabili sono correlate?}
+qual <- c(qual,"lavoro","educazione")
+X.qual <- X[X %in% qual]
+
+corr <- matrix(NA,ncol=length(X.qual), length(X.qual))
+colnames(corr) <- X.qual
+rownames(corr) <- X.qual
+
+library(lsr)
+for (i in 1:length(X.qual)){
+  for (j in 1:length(X.qual)) {
+  v <- cramersV(bank.clean[,X.qual[i]], bank.clean[,X.qual[j]])
+  corr[i,j] <- round(v,3)
+  }
+}
+
+## C'è un po' di correlazione.
+?heatmap
+heatmap(corr, Rowv = NA, Colv = NA)
+
+## Aggiungi la legenda.
+## E la correlazione con l'età.
+
+bank.segm$age <- scale(bank.segm$age)     ## Standardizziamo la variabile età
+str(bank.segm)
+
+```
+
+```{r Creaiamo una matrice di distanze tra le osservazioni}
+
+## Costruiamo la model matrx: trattiamo le variabili come quantitative.
+library(fastDummies)
+bank.segm.wide <- dummy_cols(bank.segm, select_columns = X.qual)
+bank.segm.wide <- bank.segm.wide[,setdiff(colnames(bank.segm.wide),c(X.qual,"housing_no","loan_no"))]
+head(bank.segm.wide)
+
+##Togliamo due colonne per le variabili binarie.
+# library(StatMatch)
+# dist <- gower.dist(bank.segm, var.weights = NULL)
+# ## Computata la distanza di Gower tra le osservazioni.
+# rm(list = "dist")
+bank.segm.wide$age <- scale(bank.segm.wide$age)
+```
+
+```{r Proviamo a segmentare}
+str(bank.segm.wide)
+bank.dist <- dist(bank.segm.wide, method = "manhattan")
+class(bank.dist)
+
+bank.hcl <- hclust(bank.dist, method = "complete")          
+bank.hcl
+plot(bank.hcl, labels = FALSE, main ="Dendrogramma", xlab="")
+
+## Si vedono dei bei clusteroni. 3 o 4 cluster sembrerebbe.
+c3 <- cutree(bank.hcl, k = 3)
+table(c3)
+c4 <- cutree(bank.hcl, k = 4)
+table(c4)
+c5 <- cutree(bank.hcl, k = 5)
+table(c5)
+
+library("flexclust")
+barchart(bank.hcl, bank.segm.wide, k = 4)
+str(bank.segm)
+bank.segm.wide$ynum <- as.numeric(bank.clean$y =="yes")
+means <- NULL
+means <- c(means,mean(bank.segm.wide$ynum[c4==1]))
+means <- c(means,mean(bank.segm.wide$ynum[c4==2]))
+means <- c(means,mean(bank.segm.wide$ynum[c4==3]))
+means <- c(means,mean(bank.segm.wide$ynum[c4==4]))
+## Un risultato è stato ottenuto: il primo cluster è molto più interessato al deposito rispetto agli altri due.
+prop.table(table(c4))
+
+## Mosaic plot
+tab <- cbind(means, 1-means)
+colnames(tab) <- c("yes","no")
+rownames(tab) <- c("Cluster 1 - 5.1%","Cluster 2 - 34.5%","Cluster 3 - 58.5%","Cluster 4 - 1.9%")
+dimnames(tab)
+names(dimnames(tab))
+mosaicplot(tab,  main = "Probabilità di accettazione dell'offerta per cluster", color = c("#00BFC4","#F8766D"))
+?plot
+?mosaicplot
+```
+
+```{r K-Medie}
+
+bank.km28 <- stepcclust(bank.segm.wide[,-ncol(bank.segm.wide)], k = 2:8, nrep = 10)
+plot(bank.km28)
+
+barchart(bank.km28[["2"]])
+barchart(bank.km28[["4"]])
+k4 <- clusters(bank.km28[["4"]])
+k4_ynum <- with(bank.segm.wide, table("Segment number" = k4, ynum))
+mosaicplot(k4_ynum,  main = "")
+```
+
+```{r Segmentazione con Gower}
+## Questo è il metodo di segmentazione che voglio provare.
+str(bank.segm)
+mean(bank.segm$age)   ## Media pari a zero, è già stata standardizzata
+## Questo è l'insieme ridotto.
+bank.segm$age <- as.numeric(bank.segm$age)
+
+##Troppi dati per qualche ragione.
+## Distanze di Gower con cui fare la classificazione.
+## Prendiamo un campione del dataset
+sample.bank <- sample(1:nrow(bank.segm), 0.5*nrow(bank.segm))
+?daisy
+
+bank.dist <- daisy(bank.segm[sample.bank,], metric="gower")
+bank.clust <- hclust(bank.dist, method="complete")
+plot(bank.clust, main="", labels=F)      ## Yo, ci sono dei gruppi ben definiti.
+?daisy
+
+## Proviamo con 3, 4 o 5 cluster.
+c3 <- cutree(bank.clust, k = 3)
+table(c3)    ## 3 cluster della stessa dimensione
+c4 <- cutree(bank.clust, k = 4)
+table(c4)   ## 4 cluster comunque abbastanza grandi
+c5 <- cutree(bank.clust, k = 5)
+table(c5)   ## Anche questo è adeguato.
+
+bank.segm$y <- bank.clean$y
+bank.segm$ynum <- as.numeric(bank.segm$y == "yes")
+
+means <- NULL
+means <- c(means,mean(bank.segm[sample.bank,]$ynum[c4==1]))
+means <- c(means,mean(bank.segm[sample.bank,]$ynum[c4==2]))
+means <- c(means,mean(bank.segm[sample.bank,]$ynum[c4==3]))
+means <- c(means,mean(bank.segm[sample.bank,]$ynum[c4==4]))
+
+## Differenze minuscole.
+## Proviamo a fare un altra cosa.
+## Non aggreghiamo le variabili come fatto all'inizio
+X1 <- c("age","job","marital","education","default","housing","loan","poutcome")
+bank.segm.orig <- bank.clean[,X1]
+rm(bank.dist)
+str(bank.segm.orig)
+bank.segm.orig$age <- as.numeric(scale(bank.segm.orig$age))
+## Proviamo così intanto
+
+sample.bank.orig <- sample(1:nrow(bank.segm.orig), 0.5*nrow(bank.segm.orig))
+?daisy
+
+bank.dist <- daisy(bank.segm.orig[sample.bank.orig,], metric="gower")
+bank.clust <- hclust(bank.dist, method="complete")
+plot(bank.clust, main="", labels=F)      ## Yo, ci sono dei gruppi ben definiti.
+
+## Vediamo come viene.
+c3 <- cutree(bank.clust, k = 3)
+table(c3)    ## 3 cluster della stessa dimensione
+c4 <- cutree(bank.clust, k = 4)
+table(c4)   ## 4 cluster comunque abbastanza grandi
+c5 <- cutree(bank.clust, k = 5)
+table(c5)
+bank.segm.orig$ynum <- as.numeric(bank.clean$y == "yes")
+
+## Vediamo le diiferenze
+means <- NULL
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==1]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==2]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==3]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==4]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==5]))
+
+## Non ci sono grosse differenze.
+
+
+## Proviamo modificando i pesi, che potrebbe essere promettente
+?daisy
+ws <- rep(1,length(X1))
+ws[2] <- 4
+ws[1] <- 2
+bank.dist <- daisy(bank.segm.orig[sample.bank.orig,X1], metric="gower", weights = ws)  ## Risultati non chiari.
+bank.clust <- hclust(bank.dist, method="complete")
+plot(bank.clust, main="", labels=F)
+c3 <- cutree(bank.clust, k = 3)
+table(c3)    ## 3 cluster della stessa dimensione
+c4 <- cutree(bank.clust, k = 4)
+table(c4)   ## 4 cluster comunque abbastanza grandi
+c5 <- cutree(bank.clust, k = 5)
+table(c5)
+means <- NULL
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==1]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==2]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==3]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==4]))
+means <- c(means,mean(bank.segm.orig[sample.bank,]$ynum[c5==5]))  ## Non ci sono differenze rilevanti
+means
+```
+
+```{r Proviamo a fare un clustering basato sulla mistura di regressione}
+## Mistura di normali sarebbe strano, perchè le variabili sono fattori.
+bank.segm
+library(flexclust) 
+#per i dati
+library(mclust)
+vacmet.m18 <- Mclust(bank.segm.orig[,X1], G = 1:8)
+vacmet.m18$modelName
+plot(vacmet.m18, what = "classification")
+
+```
+
+```{r Mistura di regressioni}
+bank.lm <- lm(ynum ~ ., data = bank.segm.orig[,c("ynum",X1)])
+summary(bank.lm)
+
+## Adesso la mistura
+bank.m <- stepFlexmix(ynum ~ ., data = bank.segm.orig[,c("ynum",X1)],
+                          k = 1:5, nrep = 10, verbose = FALSE,
+                          control = list(iter.max = 2000))
+
+bank.m2 <- getModel(bank.m)
+summary(refit(bank.m2)) 
+summary(bank.m2)
+
+```
+
+
+
+
+
+
+
+
