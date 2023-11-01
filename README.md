@@ -16,4 +16,4 @@ Il file "Analisi_del_Default_Balanced_Dataset" fa riferimento all'analisi dello 
 
 Il file "Segmentazion" contiene l'analisi relativa al clustering dei clienti. Sono stati provati diversi metodi, scegliendo quello che dava risultati più interpretabili.
 
-Il codice è scritto in markdown, ma solo per poterlo organizzare i segmenti. Non è pensato per essere knittato in un pdf.
+Il codice è scritto in markdown, ma solo per poterlo organizzare in segmenti. Non è pensato per essere knittato in un pdf.
