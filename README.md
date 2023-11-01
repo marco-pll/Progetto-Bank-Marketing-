@@ -10,4 +10,10 @@ I dati sono stati ottenuti a [questo link](https://www.openml.org/search?type=da
 I dati sono composti da due dataset, bank_full.csv e bank_additional_full.csv, il primo utilizzato per l'analisi dell'interesse e il clustering, i secondo utilizzato per l'analisi dei clienti in default.
 
 ## Codice
-Il codice relativo al file "Previsione dell'interesse" fa riferimento all'analisi svolta al fine del primo obiettivo: cercare un modello che preveda l'interesse del cliente per il prodotto offerto. La metrica utilizzata per il confronto tra i modelli è il punteggio F1. Il codice è scritto in markdown, ma solo per poterlo organizzare i segmenti. Non è pensato per essere knittato in un pdf.
+Il codice relativo al file "Previsione dell'interesse" fa riferimento all'analisi svolta al fine del primo obiettivo: cercare un modello che preveda l'interesse del cliente per il prodotto offerto. La metrica utilizzata per il confronto tra i modelli è il punteggio F1. 
+
+Il file "Analisi_del_Default_Balanced_Dataset" fa riferimento all'analisi dello stato di default del cliente. La scelta del modello si basa sulla metrica F1.
+
+Il file "Segmentazion" contiene l'analisi relativa al clustering dei clienti. Sono stati provati diversi metodi, scegliendo quello che dava risultati più interpretabili.
+
+Il codice è scritto in markdown, ma solo per poterlo organizzare i segmenti. Non è pensato per essere knittato in un pdf.
